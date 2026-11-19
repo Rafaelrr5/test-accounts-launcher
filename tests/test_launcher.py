@@ -27,6 +27,7 @@ class ParsingTest(unittest.TestCase):
 
     def test_normalize_url(self):
         self.assertEqual(s.normalize_url(" https://app.example.com/new/login "), "https://app.example.com/new/login")
+        self.assertEqual(s.normalize_url("http://localhost:3000/login"), "http://localhost:3000/login")
         for bad in ("app.example.com/login", "https://app.example.com/", "http://app.example.com/login"):
             with self.assertRaises(ValueError):
                 s.normalize_url(bad)
@@ -38,6 +39,12 @@ class ParsingTest(unittest.TestCase):
         self.assertFalse(s.is_logged_in("https://app.example.com/new/login?step=2fa", login))
         self.assertFalse(s.is_logged_in("https://app.example.com/new/login/mfa", login))
         self.assertFalse(s.is_logged_in("https://other.example.com/new/", login))
+
+
+class LinuxLauncherTest(unittest.TestCase):
+    def test_desktop_exec_quoting(self):  # freedesktop spec: quote args, escape " ` $ \, then double \ and %
+        self.assertEqual(s.desktop_exec(["/home/a b/py", "50%"]), '"/home/a b/py" "50%%"')
+        self.assertEqual(s.desktop_exec(['x$y"z']), '"x\\\\$y\\\\"z"')
 
 
 if __name__ == "__main__":

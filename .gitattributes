@@ -1,2 +1,3 @@
-# Keep the installer with CRLF bytes in the repo so Download ZIP also runs correctly in cmd.exe
+# Keep installers byte-exact in the repo so Download ZIP runs too: CRLF for cmd.exe, LF for bash.
 *.bat -text
+*.sh text eol=lf

@@ -5,7 +5,7 @@
     python launcher.py open              open and log in one window per account (the desktop shortcut runs this)
     python launcher.py enroll <account>  turn on 2FA for an account that has none yet, saving its key
     python launcher.py page              write and open contas.html: logins, passwords and live 2FA codes
-    python launcher.py shortcut          create the desktop shortcuts (Windows)
+    python launcher.py shortcut          create the desktop shortcuts (Windows, macOS, Linux)
 
 Every command takes --config <file> (default: config.json next to this script). One config per environment.
 Passwords and 2FA keys live only in that file; nothing secret is ever printed.
@@ -20,14 +20,17 @@ import html
 import json
 import os
 import re
+import shlex
 import shutil
 import socket
 import struct
 import subprocess
 import sys
 import time
+import unicodedata
 import urllib.request
 import webbrowser
+from pathlib import Path
 from urllib.parse import urlsplit
 
 try:
@@ -68,8 +71,9 @@ def save(path, c):
 def normalize_url(url):
     url = url.strip()
     parts = urlsplit(url)
-    if parts.scheme != "https" or not parts.hostname:
-        raise ValueError("use o endereço completo, começando com https://")
+    local = parts.hostname in ("localhost", "127.0.0.1")
+    if not parts.hostname or not (parts.scheme == "https" or (parts.scheme == "http" and local)):
+        raise ValueError("use o endereço completo, começando com https:// (http:// só para localhost)")
     if parts.path in ("", "/"):  # "logged in" means leaving this path, so the root cannot be it
         raise ValueError("use o endereço da página de login em si (ex.: https://app.suaempresa.com/login)")
     return url
@@ -112,17 +116,18 @@ def find_chrome(c):
     if c.get("chrome"):
         return c["chrome"]
     env = os.path.expandvars
+    mac = "Google Chrome.app/Contents/MacOS/Google Chrome"
     for p in (env(r"%ProgramW6432%\Google\Chrome\Application\chrome.exe"),  # 64-bit Program Files even from 32-bit Python
               env(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
               env(r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"),
               env(r"%LocalAppData%\Google\Chrome\Application\chrome.exe"),
-              "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"):
+              "/Applications/" + mac, os.path.expanduser("~/Applications/" + mac)):
         if os.path.isfile(p):
             return p
-    p = shutil.which("google-chrome") or shutil.which("google-chrome-stable") or shutil.which("chromium")
-    if not p:
-        sys.exit("Chrome não encontrado. Coloque o caminho do chrome.exe em \"chrome\" no config.json.")
-    return p
+    for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):  # Linux
+        if shutil.which(name):
+            return shutil.which(name)
+    sys.exit("Chrome não encontrado. Coloque o caminho do Chrome em \"chrome\" no config.json.")
 
 
 # Local CDP endpoint: scheme and host are fixed, only the integer port varies.
@@ -141,15 +146,17 @@ def pages(port):
 
 def launch(chrome, cfg, i, port, url):
     # No --remote-allow-origins: our client sends no Origin header, so web pages cannot drive these windows.
+    # Own session on macOS/Linux so closing the terminal that ran this does not close the windows.
     subprocess.Popen([chrome, "--incognito", f"--user-data-dir={os.path.join(profiles_dir(cfg), f'p{i}')}",
                       f"--remote-debugging-port={port}", f"--window-position={60 + i * 80},{40 + i * 60}",
-                      "--window-size=1400,900", "--no-first-run", "--no-default-browser-check", url])
+                      "--window-size=1400,900", "--no-first-run", "--no-default-browser-check", url],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=os.name != "nt")
 
 
 class Tab:
     def __init__(self, port, host):
         if create_connection is None:
-            sys.exit("Falta a biblioteca websocket-client. Rode instalar.bat (ou: pip install -r requirements.txt).")
+            sys.exit("Falta a biblioteca websocket-client. Rode o instalador (ou: pip install -r requirements.txt).")
         target = None
         for k in range(30):  # a fresh window first shows about:blank; wait for the app's page
             try:
@@ -189,7 +196,8 @@ INPUT_TYPES = f"{VISIBLE_INPUTS}.map(e=>e.type)"
 CLEAR = (f"(()=>{{const s=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;"
          f"{VISIBLE_INPUTS}.forEach(e=>{{if(e.value){{s.call(e,'');e.dispatchEvent(new Event('input',{{bubbles:true,composed:true}}))}}}});return 1}})()")
 PAGE_TEXT = ("(()=>{const o=[];const w=r=>{const it=document.createTreeWalker(r,NodeFilter.SHOW_TEXT);let n;"
-             "while(n=it.nextNode()){const t=n.textContent.trim();if(t)o.push(t)}"
+             "while(n=it.nextNode()){const p=n.parentElement,t=n.textContent.trim();"  # visible text only, never inline script source
+             "if(t&&p&&!/^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE)$/.test(p.tagName)&&p.getClientRects().length)o.push(t)}"
              "r.querySelectorAll('*').forEach(e=>{if(e.shadowRoot)w(e.shadowRoot)})};w(document.body);return o.join('\\n')})()")
 CLICK = ("((labels)=>{const b=%s.find(e=>(e.tagName==='BUTTON'||e.tagName==='A'||e.getAttribute('role')==='button')"
          "&&e.getBoundingClientRect().width>0&&labels.includes((e.innerText||e.textContent||'').replace(/\\s+/g,' ').trim()));"
@@ -516,44 +524,106 @@ def cmd_page(cfg, open_it=True):
         f.write(page)
     print(f"{len(rows)} conta(s) -> {out}")
     if open_it:
-        webbrowser.open("file:///" + out.replace(os.sep, "/").lstrip("/"))
+        webbrowser.open(Path(out).as_uri())
+
+
+SHORTCUTS = (("Contas de teste", "open", "Abre uma janela anônima por conta de teste, já logada"),
+             ("Senhas e códigos 2FA", "page", "Logins, senhas e código 2FA ao vivo das contas de teste"))
 
 
 def cmd_shortcut(cfg):
-    if os.name != "nt":
-        sys.exit("Atalho automático só no Windows. No Mac/Linux, rode: python launcher.py open")
-    pyw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
-    if not os.path.isfile(pyw):
-        pyw = sys.executable
     cfg = os.path.abspath(cfg)
     stem = os.path.splitext(os.path.basename(cfg))[0]
     suffix = "" if stem == "config" else f" ({stem})"
-    q = lambda s: "'" + s.replace("'", "''") + "'"  # PowerShell single-quoted literal
-    icon = find_chrome(load(cfg)) + ",0"
-    script = "$sh=New-Object -ComObject WScript.Shell;$d=[Environment]::GetFolderPath('Desktop');"
-    names = []
-    for name, cmd, desc in ((f"Contas de teste{suffix}", "open", "Abre uma janela anônima por conta de teste, já logada"),
-                            (f"Senhas e códigos 2FA{suffix}", "page", "Logins, senhas e código 2FA ao vivo das contas de teste")):
-        args = f'"{os.path.abspath(__file__)}" --config "{cfg}" {cmd}'
-        script += (f"$s=$sh.CreateShortcut((Join-Path $d {q(name + '.lnk')}));$s.TargetPath={q(pyw)};$s.Arguments={q(args)};"
-                   f"$s.WorkingDirectory={q(HERE)};$s.IconLocation={q(icon)};$s.Description={q(desc)};$s.Save();")
-        names.append(f'"{name}"')
+    chrome = find_chrome(load(cfg))
+    entries = [(name + suffix, [sys.executable, os.path.abspath(__file__), "--config", cfg, "--log", cmd], desc)
+               for name, cmd, desc in SHORTCUTS]
+    if os.name == "nt":
+        made = shortcut_windows(entries, chrome)
+    elif sys.platform == "darwin":
+        made = shortcut_macos(entries)
+    else:
+        made = shortcut_linux(entries)
+    print("Atalhos criados:\n  " + "\n  ".join(made))
+
+
+def shortcut_windows(entries, chrome):
+    pyw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")  # no console window
+    q = lambda v: "'" + v.replace("'", "''") + "'"  # PowerShell single-quoted literal
+    script = "$sh=New-Object -ComObject WScript.Shell;$d=[Environment]::GetFolderPath('Desktop');$d;"
+    for name, argv, desc in entries:
+        args = subprocess.list2cmdline(argv[1:])
+        script += (f"$s=$sh.CreateShortcut((Join-Path $d {q(name + '.lnk')}));$s.TargetPath={q(pyw if os.path.isfile(pyw) else argv[0])};"
+                   f"$s.Arguments={q(args)};$s.WorkingDirectory={q(HERE)};$s.IconLocation={q(chrome + ',0')};$s.Description={q(desc)};$s.Save();")
     enc = base64.b64encode(script.encode("utf-16-le")).decode()
     r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", enc], capture_output=True)
     if r.returncode:  # PowerShell writes in the console code page: decode leniently
         sys.exit("Não consegui criar os atalhos: " + (r.stderr.decode(errors="replace").strip().splitlines() or ["erro desconhecido"])[-1])
-    print("Atalhos criados na área de trabalho: " + ", ".join(names))
+    desktop = r.stdout.decode(errors="replace").strip().splitlines()[0]
+    return [os.path.join(desktop, name + ".lnk") for name, _, _ in entries]
+
+
+def shortcut_macos(entries):
+    """A tiny AppleScript app on the Desktop: double-click runs the command in the background, no Terminal window."""
+    made = []
+    for name, argv, _ in entries:
+        app = os.path.expanduser(f"~/Desktop/{name}.app")
+        shell = shlex.join(argv) + " >/dev/null 2>&1 &"
+        script = 'do shell script "' + shell.replace("\\", "\\\\").replace('"', '\\"') + '"'
+        shutil.rmtree(app, ignore_errors=True)
+        r = subprocess.run(["osacompile", "-o", app, "-e", script], capture_output=True, text=True)
+        if r.returncode:
+            sys.exit("Não consegui criar o atalho: " + r.stderr.strip())
+        made.append(app)
+    return made
+
+
+def desktop_exec(argv):
+    """Exec= value per the freedesktop Desktop Entry spec: quote each arg, then escape for the string type."""
+    quoted = []
+    for a in argv:
+        for ch in ("\\", '"', "`", "$"):
+            a = a.replace(ch, "\\" + ch)
+        quoted.append('"' + a + '"')
+    return " ".join(quoted).replace("\\", "\\\\").replace("%", "%%")
+
+
+def shortcut_linux(entries):
+    """.desktop launchers in the app menu and, when it exists, on the Desktop."""
+    apps = os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "applications")
+    os.makedirs(apps, exist_ok=True)
+    try:
+        desktop = subprocess.run(["xdg-user-dir", "DESKTOP"], capture_output=True, text=True).stdout.strip()
+    except OSError:
+        desktop = os.path.expanduser("~/Desktop")
+    made = []
+    for name, argv, desc in entries:
+        slug = re.sub(r"[^a-z0-9]+", "-", unicodedata.normalize("NFKD", name.lower()).encode("ascii", "ignore").decode()).strip("-")
+        body = (f"[Desktop Entry]\nType=Application\nName={name}\nComment={desc}\nExec={desktop_exec(argv)}\n"
+                "Icon=web-browser\nTerminal=false\nCategories=Network;\n")
+        targets = [os.path.join(apps, slug + ".desktop")]
+        if desktop and os.path.isdir(desktop) and os.path.abspath(desktop) != os.path.expanduser("~"):
+            targets.append(os.path.join(desktop, slug + ".desktop"))
+        for path in targets:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(body)
+            os.chmod(path, 0o700)  # launchers must be executable; only the owner needs it
+            if shutil.which("gio"):  # GNOME only runs Desktop launchers marked as trusted
+                subprocess.run(["gio", "set", path, "metadata::trusted", "true"], capture_output=True)
+            made.append(path)
+    return made
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", default=os.path.join(HERE, "config.json"), help="arquivo de configuração (padrão: config.json)")
+    ap.add_argument("--log", action="store_true", help="grava a saída em run.log, ao lado da configuração (usado pelos atalhos)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name in ("setup", "open", "page", "shortcut", "keep"):
         sub.add_parser(name)
     sub.add_parser("enroll").add_argument("account", help="login, nome da janela ou número da conta (1, 2...)")
     a = ap.parse_args()
-    if sys.stdout is None:  # pythonw (desktop shortcut): no console, so log next to the config
+    if a.log or sys.stdout is None:  # desktop shortcuts have no console: log next to the config
         sys.stdout = sys.stderr = open(os.path.join(os.path.dirname(os.path.abspath(a.config)), "run.log"), "w", encoding="utf-8")
     if a.cmd == "setup":
         cmd_setup(a.config)

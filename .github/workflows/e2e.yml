@@ -1,0 +1,117 @@
+# End to end on clean GitHub machines: install exactly as a user would (answers piped into the installer),
+# turn on 2FA for one account through a wizard, then double-click the desktop shortcut and wait for every
+# window to be logged in. The site is tests/mock_app.py (login + 2FA in shadow DOM), so no real account is used.
+name: e2e
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+    env:
+      PY: ${{ matrix.os == 'windows-latest' && '.venv/Scripts/python.exe' || '.venv/bin/python' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Linux - virtual screen, Chrome sandbox, desktop folder
+        if: runner.os == 'Linux'
+        run: |
+          # CI-only: Ubuntu 24.04 runners block the user namespaces Chrome's sandbox needs.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          sudo apt-get update -qq && sudo apt-get install -y -qq xvfb libglib2.0-bin xdg-user-dirs >/dev/null
+          Xvfb :99 -screen 0 1920x1080x24 &
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"
+          mkdir -p ~/Desktop && xdg-user-dirs-update --set DESKTOP ~/Desktop
+
+      - name: macOS - use the Python a fresh Mac has (Apple's /usr/bin/python3)
+        if: runner.os == 'macOS'
+        run: |
+          echo "/usr/bin" >> "$GITHUB_PATH"
+          /usr/bin/python3 --version
+
+      - name: Install (Linux/macOS) - bash instalar.sh
+        if: runner.os != 'Windows'
+        run: bash instalar.sh < tests/ci-answers.txt
+
+      - name: Install (Windows) - instalar.bat
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: instalar.bat < tests\ci-answers.txt
+
+      - name: Unit tests
+        run: $PY -m unittest discover -s tests -v
+
+      - name: Start the mock app
+        run: |
+          nohup python3 tests/mock_app.py 8765 events.log > mock.out 2>&1 &
+          sleep 3 && curl -sf -o /dev/null http://127.0.0.1:8765/login && echo "mock up"
+        if: runner.os != 'Windows'
+      - name: Start the mock app (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Start-Process python -ArgumentList 'tests/mock_app.py','8765','events.log' -WindowStyle Hidden
+          Start-Sleep 3; (Invoke-WebRequest http://127.0.0.1:8765/login -UseBasicParsing).StatusCode
+
+      - name: Turn on 2FA for "bia" through the wizard (enroll)
+        run: |
+          $PY launcher.py enroll bia
+          $PY -c "import json; a=json.load(open('config.json'))['accounts'][1]; assert len(a['totp_secret'])>=16 and len(a['recovery_codes'])==4; print('bia key and recovery codes saved')"
+          $PY tests/ci.py close 9342
+
+      - name: Double-click the desktop shortcut (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          ls -la ~/.local/share/applications ~/Desktop
+          cat ~/.local/share/applications/contas-de-teste.desktop
+          desktop-file-validate ~/.local/share/applications/contas-de-teste.desktop 2>/dev/null || true
+          gio launch ~/Desktop/contas-de-teste.desktop
+      - name: Double-click the desktop shortcut (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          ls -la ~/Desktop
+          open "$HOME/Desktop/Contas de teste.app"
+      - name: Double-click the desktop shortcut (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $d = [Environment]::GetFolderPath('Desktop'); Get-ChildItem $d -Filter *.lnk | Select-Object Name
+          Start-Process (Join-Path $d 'Contas de teste.lnk')
+
+      - name: Wait until both windows are logged in
+        run: $PY tests/ci.py wait-log run.log 2 300
+
+      - name: Check the logins on the app side and capture the windows
+        if: always()
+        run: |
+          $PY tests/ci.py events events.log
+          sleep 8
+          $PY tests/ci.py shot 9341 shot-${{ runner.os }}-ana.png
+          $PY tests/ci.py shot 9342 shot-${{ runner.os }}-bia.png
+
+      - name: Password page builds
+        run: $PY -c "import launcher, os; launcher.cmd_page('config.json', open_it=False); assert os.path.getsize('contas.html') > 3000"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        if: always()
+        with:
+          name: e2e-${{ runner.os }}
+          path: |
+            shot-*.png
+            run.log
+            events.log
+            mock.out
