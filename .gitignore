@@ -1,0 +1,10 @@
+# Local only: passwords and 2FA keys live here. Never commit.
+config.json
+*.json
+!example-config.json
+contas.html
+run.log
+profiles/
+.venv/
+__pycache__/
+*.tmp

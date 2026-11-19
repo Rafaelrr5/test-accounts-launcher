@@ -1,0 +1,19 @@
+{
+  "login_url": "https://app.suaempresa.com/login",
+  "base_port": 9341,
+  "chrome": "",
+  "accounts": [
+    {
+      "login": "solicitante.teste",
+      "password": "troque-pela-senha",
+      "label": "Solicitante",
+      "totp_secret": ""
+    },
+    {
+      "login": "gerente.teste",
+      "password": "troque-pela-senha",
+      "label": "Gerente",
+      "totp_secret": ""
+    }
+  ]
+}

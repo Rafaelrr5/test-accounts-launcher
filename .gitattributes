@@ -1,0 +1,2 @@
+# Keep the installer with CRLF bytes in the repo so Download ZIP also runs correctly in cmd.exe
+*.bat -text
