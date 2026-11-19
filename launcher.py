@@ -607,7 +607,7 @@ def shortcut_linux(entries):
         for path in targets:
             with open(path, "w", encoding="utf-8") as f:
                 f.write(body)
-            os.chmod(path, 0o700)  # launchers must be executable; only the owner needs it
+            os.chmod(path, 0o700)  # nosemgrep: insecure-file-permissions - .desktop launchers must be executable; owner only
             if shutil.which("gio"):  # GNOME only runs Desktop launchers marked as trusted
                 subprocess.run(["gio", "set", path, "metadata::trusted", "true"], capture_output=True)
             made.append(path)
